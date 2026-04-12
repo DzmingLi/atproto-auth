@@ -17,10 +17,7 @@ use atproto_oauth::{
     workflow::{OAuthClient, OAuthRequest, OAuthRequestState, oauth_init},
 };
 use atproto_oauth::storage::OAuthRequestStorage;
-use atproto_oauth_axum::{
-    handle_jwks::handle_oauth_jwks,
-    handler_metadata::handle_oauth_metadata,
-};
+use atproto_oauth_axum::handler_metadata::handle_oauth_metadata;
 
 use crate::config::OAuthConfig;
 use crate::extractor::SESSION_COOKIE;
@@ -275,10 +272,17 @@ async fn metadata(State(state): State<OAuthState>) -> impl IntoResponse {
     handle_oauth_metadata(config).await
 }
 
-/// Serve JWKS.
+/// Serve JWKS (public keys only — the upstream handle_oauth_jwks leaks private keys).
 async fn jwks(State(state): State<OAuthState>) -> impl IntoResponse {
-    let config = state.config.to_client_config();
-    handle_oauth_jwks(config).await
+    let mut keys = Vec::new();
+    for key_data in &state.config.to_client_config().signing_keys {
+        if let Ok(public_key) = to_public(key_data) {
+            if let Ok(jwk) = atproto_oauth::jwk::generate(&public_key) {
+                keys.push(jwk);
+            }
+        }
+    }
+    axum::Json(serde_json::json!({ "keys": keys }))
 }
 
 // ---- Helpers ----
