@@ -274,14 +274,11 @@ async fn metadata(State(state): State<OAuthState>) -> impl IntoResponse {
 
 /// Serve JWKS (public keys only — the upstream handle_oauth_jwks leaks private keys).
 async fn jwks(State(state): State<OAuthState>) -> impl IntoResponse {
-    let mut keys = Vec::new();
-    for key_data in &state.config.to_client_config().signing_keys {
-        if let Ok(public_key) = to_public(key_data) {
-            if let Ok(jwk) = atproto_oauth::jwk::generate(&public_key) {
-                keys.push(jwk);
-            }
-        }
-    }
+    let keys: Vec<_> = state.config.to_client_config().signing_keys
+        .iter()
+        .filter_map(|key_data| to_public(key_data).ok())
+        .filter_map(|pk| atproto_oauth::jwk::generate(&pk).ok())
+        .collect();
     axum::Json(serde_json::json!({ "keys": keys }))
 }
 
