@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
@@ -9,6 +10,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
 use rand::distr::{Alphanumeric, SampleString};
+use tokio::sync::RwLock;
 
 use atproto_identity::key::{to_public, identify_key, generate_key, KeyType};
 use atproto_oauth::{
@@ -30,6 +32,8 @@ pub struct OAuthState {
     pub request_store: Arc<dyn OAuthRequestStorage>,
     pub session_store: Arc<dyn SessionStore>,
     pub http_client: reqwest::Client,
+    /// Maps oauth_state → cli_redirect URL for CLI login flows.
+    pub cli_redirects: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl axum::extract::FromRef<OAuthState> for Arc<dyn SessionStore> {
@@ -62,6 +66,8 @@ pub fn oauth_router(state: OAuthState) -> Router {
 #[derive(serde::Deserialize)]
 struct LoginQuery {
     handle: String,
+    /// Optional: redirect URL for CLI login (e.g. http://localhost:19284/callback)
+    cli_redirect: Option<String>,
 }
 
 /// Step 1: User provides handle → we resolve their PDS, do PAR, redirect to authorization page.
@@ -133,6 +139,12 @@ async fn login_start(
 
     state.request_store.insert_oauth_request(oauth_request).await
         .map_err(|e| OAuthError::Internal(format!("store request: {e}")))?;
+
+    // Store CLI redirect if present
+    if let Some(ref cli_redirect) = q.cli_redirect {
+        state.cli_redirects.write().await
+            .insert(oauth_state_value.clone(), cli_redirect.clone());
+    }
 
     // Build authorization URL
     let auth_url = format!(
@@ -226,17 +238,32 @@ async fn oauth_callback(
     state.session_store.create_session(&session).await
         .map_err(|e| OAuthError::Internal(format!("create session: {e}")))?;
 
-    // Set cookie and redirect to app root
-    let cookie = Cookie::build((SESSION_COOKIE, session_token))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .max_age(time::Duration::days(30))
-        .build();
+    // Check if this was a CLI login flow
+    let cli_redirect = state.cli_redirects.write().await.remove(&q.state);
 
-    let jar = CookieJar::new().add(cookie);
+    if let Some(redirect_url) = cli_redirect {
+        // CLI flow: redirect to local server with token
+        let url = format!(
+            "{}?token={}&did={}&handle={}",
+            redirect_url,
+            urlencoding::encode(&session_token),
+            urlencoding::encode(&session.did),
+            urlencoding::encode(session.handle.as_deref().unwrap_or("")),
+        );
+        Ok(Redirect::temporary(&url).into_response())
+    } else {
+        // Web flow: set cookie and redirect to app root
+        let cookie = Cookie::build((SESSION_COOKIE, session_token))
+            .path("/")
+            .http_only(true)
+            .same_site(SameSite::Lax)
+            .max_age(time::Duration::days(30))
+            .build();
 
-    Ok((jar, Redirect::temporary("/")).into_response())
+        let jar = CookieJar::new().add(cookie);
+
+        Ok((jar, Redirect::temporary("/")).into_response())
+    }
 }
 
 /// Logout: clear session and cookie.
