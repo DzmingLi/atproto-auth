@@ -32,8 +32,28 @@ pub struct OAuthState {
     pub request_store: Arc<dyn OAuthRequestStorage>,
     pub session_store: Arc<dyn SessionStore>,
     pub http_client: reqwest::Client,
-    /// Maps oauth_state → cli_redirect URL for CLI login flows.
+    /// Maps oauth_state → cli_redirect URL for CLI login flows. Initialized
+    /// empty; populated per-login when the client asks for a CLI redirect.
     pub cli_redirects: Arc<RwLock<HashMap<String, String>>>,
+}
+
+impl OAuthState {
+    /// Construct with the required collaborators; auxiliary state
+    /// (`http_client`, `cli_redirects`) is initialized to sensible defaults.
+    /// Callers that need to override either can do so after construction.
+    pub fn new(
+        config: OAuthConfig,
+        request_store: Arc<dyn OAuthRequestStorage>,
+        session_store: Arc<dyn SessionStore>,
+    ) -> Self {
+        Self {
+            config,
+            request_store,
+            session_store,
+            http_client: reqwest::Client::new(),
+            cli_redirects: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
 }
 
 impl axum::extract::FromRef<OAuthState> for Arc<dyn SessionStore> {
