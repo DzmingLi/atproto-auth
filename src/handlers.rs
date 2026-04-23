@@ -312,62 +312,12 @@ async fn jwks(State(state): State<OAuthState>) -> impl IntoResponse {
 // ---- Helpers ----
 
 /// Resolve an AT Protocol handle to a PDS URL.
+/// Thin wrapper over the shared `crate::resolve` helpers so the OAuth flow
+/// gets OAuth-typed errors.
 async fn resolve_handle_to_pds(client: &reqwest::Client, handle: &str) -> Result<String, OAuthError> {
-    // Step 1: Resolve handle → DID
-    let did = if handle.starts_with("did:") {
-        handle.to_string()
-    } else {
-        // Try well-known first
-        let mut resolved = None;
-        if handle.contains('.') {
-            let url = format!("https://{}/.well-known/atproto-did", handle);
-            if let Ok(resp) = client.get(&url).send().await {
-                if resp.status().is_success() {
-                    let text = resp.text().await.unwrap_or_default().trim().to_string();
-                    if text.starts_with("did:") {
-                        resolved = Some(text);
-                    }
-                }
-            }
-        }
-        // Fallback to bsky.social
-        if resolved.is_none() {
-            let url = format!(
-                "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle={}",
-                urlencoding::encode(handle)
-            );
-            let resp = client.get(&url).send().await
-                .map_err(|e| OAuthError::Internal(format!("resolve handle: {e}")))?;
-            if resp.status().is_success() {
-                let body: serde_json::Value = resp.json().await
-                    .map_err(|e| OAuthError::Internal(e.to_string()))?;
-                resolved = body["did"].as_str().map(|s| s.to_string());
-            }
-        }
-        resolved.ok_or_else(|| OAuthError::BadRequest(format!("cannot resolve handle: {handle}")))?
-    };
-
-    // Step 2: DID → PDS URL from DID document
-    let doc_url = if did.starts_with("did:plc:") {
-        format!("https://plc.directory/{}", did)
-    } else if did.starts_with("did:web:") {
-        let domain = did.strip_prefix("did:web:").unwrap_or("");
-        format!("https://{}/.well-known/did.json", domain)
-    } else {
-        return Err(OAuthError::BadRequest(format!("unsupported DID method: {did}")));
-    };
-
-    let doc: serde_json::Value = client.get(&doc_url).send().await
-        .map_err(|e| OAuthError::Internal(format!("fetch DID doc: {e}")))?
-        .json().await
-        .map_err(|e| OAuthError::Internal(format!("parse DID doc: {e}")))?;
-
-    let pds_url = doc["service"].as_array()
-        .and_then(|svcs| svcs.iter().find(|s| s["id"] == "#atproto_pds"))
-        .and_then(|s| s["serviceEndpoint"].as_str())
-        .ok_or_else(|| OAuthError::BadRequest("no PDS endpoint in DID doc".into()))?;
-
-    Ok(pds_url.to_string())
+    let (_did, pds) = crate::resolve::resolve_handle(client, handle).await
+        .map_err(|e| OAuthError::BadRequest(e.to_string()))?;
+    Ok(pds)
 }
 
 /// Resolve a DID to a handle (best effort).
